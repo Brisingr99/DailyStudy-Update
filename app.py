@@ -1,112 +1,96 @@
 import streamlit as st
 import requests
-import datetime
-import xml.etree.ElementTree as ET
-import os
+import random
 import re
+import os
 import google.generativeai as genai
 
 # --- Konfiguration der Seite ---
 st.set_page_config(
-    page_title="Tägliches Med-Update",
+    page_title="Klinisches Refresher-Tool",
     page_icon="🩺",
     layout="wide"
 )
 
-st.title("🩺 Medizinisches Studien-Update")
-st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innerer Medizin")
+st.title("🩺 Klinisches Refresher-Tool: Krankheitsbilder")
+st.caption("Kompakte & strukturierte Übersichten für die Innere Medizin")
 
-def get_clean_xml_text(node):
-    """Extrahiert den gesamten Text eines XML-Knotens inkl. Unterelementen."""
-    if node is not None:
-        return "".join(node.itertext()).strip()
-    return ""
+# --- Umfangreicher Pool an Krankheitsbildern ---
+DISEASES = {
+    "Kardiologie": [
+        "Aortenklappenstenose", "Vorhofflimmern", "Herzinsuffizienz (HFrEF)", 
+        "Akutes Koronarsyndrom (NSTEMI/STEMI)", "Myokarditis", "Hypertonie", 
+        "Infektiöse Endokarditis", "AV-Knoten-Reentry-Tachykardie (AVNRT)"
+    ],
+    "Pneumologie": [
+        "COPD-Exazerbation", "Bronchialkarzinom", "Idiopatische Lungenfibrose", 
+        "Lungenarterienembolie", "Asthma bronchiale", "Ambulant erworbene Pneumonie", 
+        "Sarkoidose", "Pneumothorax"
+    ],
+    "Gastroenterologie & Hepatologie": [
+        "Colitis ulcerosa", "Morbus Crohn", "Dekompensierte Leberzirrhose", 
+        "Akute Pankreatitis", "Refluxkrankheit (GERD)", "Zöliakie", 
+        "Hepatozelluläres Karzinom (HCC)", "Gastrointestinale Blutung"
+    ],
+    "Endokrinologie & Diabetologie": [
+        "Diabetes mellitus Typ 2", "Hyperthyreose / Morbus Basedow", 
+        "Primärer Hyperparathyroidismus", "Cushing-Syndrom", 
+        "Nebennierenrindeninsuffizienz (Morbus Addison)", "Diabetische Ketoazidose"
+    ],
+    "Nephrologie & Rheumatologie": [
+        "Akutes Nierenversagen", "Chronische Nierenerkrankung (CKD)", 
+        "Glomerulonephritis", "Rheumatoide Arthritis", "Systemischer Lupus erythematodes", 
+        "Gichtarthritis", "ANCA-assoziierte Vaskulitis"
+    ]
+}
 
-# --- PubMed API Abfragen ---
+# Flache Liste aller Krankheitsbilder für die Zufallsauswahl
+ALL_DISEASES = [disease for group in DISEASES.values() for disease in group]
+
+# --- Wikimedia Commons Schemasuche ---
 @st.cache_data(ttl=86400)
-def fetch_pubmed_ids():
-    """Holt die Liste der PubMed-IDs für die Zielbereiche der letzten 10 Jahre."""
-    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    params = {
-        "db": "pubmed",
-        "term": "(Cardiology OR Pneumology OR Gastroenterology OR Endocrinology OR Internal Medicine) AND HASABSTRACT",
-        "reldate": 3650,
-        "retmode": "json",
-        "retmax": 500,
-        "sort": "relevance"
-    }
-    headers = {"User-Agent": "MedUpdateApp/1.0"}
-    
-    try:
-        res = requests.get(search_url, params=params, headers=headers, timeout=10)
-        data = res.json()
-        return data.get("esearchresult", {}).get("idlist", [])
-    except Exception:
-        return []
-
-@st.cache_data(ttl=86400)
-def fetch_single_study_xml(pmid):
-    """Holt Titel, Abstract und Journal für eine spezifische PMID."""
-    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    fetch_params = {"db": "pubmed", "id": pmid, "retmode": "xml"}
-    headers = {"User-Agent": "MedUpdateApp/1.0"}
-    
-    try:
-        fetch_res = requests.get(fetch_url, params=fetch_params, headers=headers, timeout=10)
-        root = ET.fromstring(fetch_res.content)
+def fetch_schema_image(english_keyword):
+    """Sucht nach medizinischen Diagrammen bei Wikimedia Commons."""
+    if not english_keyword or english_keyword == "Disease":
+        return None
         
-        title_node = root.find(".//ArticleTitle")
-        title = get_clean_xml_text(title_node)
-        
-        abstract_nodes = root.findall(".//AbstractText")
-        abstract_parts = []
-        for node in abstract_nodes:
-            label = node.get("Label", "")
-            text = get_clean_xml_text(node)
-            if text:
-                if label:
-                    abstract_parts.append(f"**{label}:** {text}")
-                else:
-                    abstract_parts.append(text)
-        
-        abstract = "\n\n".join(abstract_parts)
-        journal_node = root.find(".//Title")
-        journal = get_clean_xml_text(journal_node) or "Unbekanntes Journal"
-        
-        if title and len(abstract) > 100:
-            return title, abstract, journal
-    except Exception:
-        pass
-    return None, None, None
-
-# --- Abbildung / Schema Abfrage (Wikimedia Commons API) ---
-@st.cache_data(ttl=86400)
-def fetch_schema_image(keyword):
-    """Sucht nach einem passenden medizinischen Schema/Diagramm bei Wikimedia Commons."""
     url = "https://commons.wikimedia.org/w/api.php"
-    params = {
-        "action": "query",
-        "format": "json",
-        "generator": "search",
-        "gsrsearch": f"{keyword} diagram OR schema OR anatomy",
-        "gsrlimit": 1,
-        "prop": "imageinfo",
-        "iiprop": "url"
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10).json()
-        pages = r.get("query", {}).get("pages", {})
-        for _, page in pages.items():
-            imageinfo = page.get("imageinfo", [])
-            if imageinfo:
-                return imageinfo[0]["url"]
-    except Exception:
-        pass
+    headers = {"User-Agent": "MedRefresherApp/1.0"}
+    
+    search_queries = [
+        f"{english_keyword} diagram",
+        f"{english_keyword} anatomy",
+        f"{english_keyword} schema",
+        english_keyword
+    ]
+    
+    for query_term in search_queries:
+        params = {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": f"File:{query_term}",
+            "gsrlimit": 5,
+            "prop": "imageinfo",
+            "iiprop": "url|mime"
+        }
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=5).json()
+            pages = r.get("query", {}).get("pages", {})
+            for _, page in pages.items():
+                imageinfo = page.get("imageinfo", [])
+                if imageinfo:
+                    img_url = imageinfo[0].get("url", "")
+                    mime = imageinfo[0].get("mime", "")
+                    if any(valid_type in mime for valid_type in ["image/jpeg", "image/png", "image/svg+xml", "image/webp"]):
+                        return img_url
+        except Exception:
+            continue
     return None
 
 # --- Gemini KI API Helper ---
 def call_gemini_api(prompt, api_key):
-    """Hilfsfunktion zum Ausführen von Gemini Prompts mit automatischer Modellauswahl."""
+    """Führt Prompts mit automatischer Modellauswahl aus."""
     genai.configure(api_key=api_key)
     
     available_models = []
@@ -135,137 +119,91 @@ def call_gemini_api(prompt, api_key):
     if last_error:
         raise last_error
     else:
-        raise RuntimeError("Kein passendes Gemini-Modell für diesen API-Schlüssel gefunden.")
+        raise RuntimeError("Kein passendes Gemini-Modell verfügbar.")
 
-def summarize_with_ai(title, abstract, api_key):
-    """Generiert eine strukturierte deutsche Zusammenfassung der Studie."""
+def generate_disease_summary(disease_name, api_key):
+    """Generiert eine strukturierte medizinische Übersicht zu einem Krankheitsbild."""
     prompt = f"""
-    Du bist ein Experte für medizinische Fachliteratur. Fasse die folgende medizinische Studie präzise, fachlich korrekt und auf Deutsch zusammen.
+    Du bist ein erfahrener Facharzt für Innere Medizin. Erstelle eine fundierte, hochgradig praxistaugliche und strukturierte Übersicht zum Krankheitsbild: "{disease_name}".
     
-    Titel: {title}
-    Abstract: {abstract}
-    
-    Strukturiere die Antwort in folgende Abschnitte:
-    1. **Fachbereich & Hauptthema**
-    2. **Hintergrund & Fragestellung**
-    3. **Methodik & Studiendesign**
-    4. **Zentrale Ergebnisse**
-    5. **Klinische Relevanz / Fazit für die Praxis**
+    Gliedere die Antwort präzise in folgende Abschnitte:
+    1. **Kurzzusammenfassung & Definition**
+    2. **Epidemiologie, Ätiologie & Pathophysiologie**
+    3. **Klinik & Leitsymptome**
+    4. **Diagnostik** (Labor, Bildgebung, Staging / Funktionsdiagnostik)
+    5. **Therapie & Leitlinienprinzipien** (Konservativ, Pharmakologisch, Interventionell/Operativ)
+    6. **Wichtige Differenzialdiagnosen**
 
-    Gib ganz am Ende eine eigene Zeile im exakten Format aus:
-    SCHLAGWORT: [Hier genau ein konkretes deutsches Haupt-Krankheitsbild eintragen, z.B. "Lungenkarzinom", "Koronare Herzkrankheit", "Vorhofflimmern", "Asthma bronchiale", "Leberzirrhose"]
+    Gib am Ende EXAKT diese Steuerzeile aus:
+    SCHLAGWORT_EN: [Englisches Haupt-Suchwort für Anatomie/Schema, z.B. "Aortic stenosis", "Atrial fibrillation", "Pulmonary embolism", "Crohn disease"]
     """
     return call_gemini_api(prompt, api_key)
 
-def summarize_keyword(keyword, api_key):
-    """Generiert eine klinische Kurzzusammenfassung zum medizinischen Hauptthema."""
-    prompt = f"""
-    Du bist ein erfahrener Facharzt der Inneren Medizin. Erstelle eine prägnante, klinisch orientierte Kurzzusammenfassung zum Krankheitsbild: "{keyword}".
-    
-    Gliedere die Antwort präzise in:
-    - **Definition & Leitsymptome**
-    - **Diagnostik & Hauptparameter**
-    - **Therapieprinzipien / Standardtherapie**
-    
-    Halte dich kurz und übersichtlich (max. 150 Wörter).
-    """
-    return call_gemini_api(prompt, api_key)
+def extract_english_keyword(text):
+    """Extrahiert das englische Schlagwort für die Bildersuche."""
+    if "SCHLAGWORT_EN:" in text:
+        raw = text.split("SCHLAGWORT_EN:")[-1].split("\n")[0]
+        return re.sub(r"[\[\]\*\_\.\"]", "", raw).strip()
+    return "Disease"
 
-def extract_main_topic(summary_text):
-    """Extrahiert das Haupt-Schlagwort präzise aus der SCHLAGWORT-Zeile."""
-    if "SCHLAGWORT:" in summary_text:
-        raw = summary_text.split("SCHLAGWORT:")[-1].strip().split("\n")[0]
-        clean = re.sub(r"[\[\]\*\_\.\"]", "", raw).strip()
-        if clean and len(clean) < 50:
-            return clean
-    return "Hauptthema"
+def clean_display_text(text):
+    """Entfernt die Steuerzeile aus der Anzeige."""
+    return text.split("SCHLAGWORT_EN:")[0].strip()
 
-def clean_display_summary(summary_text):
-    """Entfernt die interne SCHLAGWORT-Zeile aus der Anzeige für den Nutzer."""
-    return summary_text.split("SCHLAGWORT:")[0].strip()
+# --- Session State Initialisierung ---
+if "selected_disease" not in st.session_state:
+    st.session_state.selected_disease = random.choice(ALL_DISEASES)
 
-# --- Session State Management ---
-id_list = fetch_pubmed_ids()
+# --- Sidebar / Steuerung ---
+st.sidebar.header("⚙️ Steuerung & Filter")
 
-if "study_index" not in st.session_state:
-    day_seed = int(datetime.date.today().strftime("%Y%m%d"))
-    st.session_state.study_index = (day_seed % len(id_list)) if id_list else 0
+category_filter = st.sidebar.selectbox(
+    "Fachbereich auswählen:",
+    ["Alle Fachbereiche"] + list(DISEASES.keys())
+)
 
-# --- Header mit Aktualisierungs-Button ---
-col_head1, col_head2 = st.columns([3, 1])
+if st.sidebar.button("🎲 Zufälliges Krankheitsbild laden", use_container_width=True):
+    if category_filter == "Alle Fachbereiche":
+        st.session_state.selected_disease = random.choice(ALL_DISEASES)
+    else:
+        st.session_state.selected_disease = random.choice(DISEASES[category_filter])
+    st.rerun()
 
-with col_head1:
-    st.subheader(f"📅 Studie des Tages ({datetime.date.today().strftime('%d.%m.%Y')})")
+st.sidebar.markdown("---")
+manual_input = st.sidebar.text_input("Manuelle Suche (beliebiges Thema):")
+if st.sidebar.button("🔍 Suchen", use_container_width=True) and manual_input:
+    st.session_state.selected_disease = manual_input
+    st.rerun()
 
-with col_head2:
-    if st.button("🎲 Weitere Studie laden", use_container_width=True):
-        st.session_state.study_index += 1
-        if "kw_summary_text" in st.session_state:
-            del st.session_state["kw_summary_text"]
-        st.rerun()
+# --- Hauptbereich ---
+st.subheader(f"📋 Refresher: {st.session_state.selected_disease}")
 
-# --- Studie ermitteln ---
-current_pmid = None
-title, abstract, journal = None, None, None
+api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY")
 
-if id_list:
-    attempts = 0
-    while attempts < 30:
-        candidate_pmid = id_list[st.session_state.study_index % len(id_list)]
-        t, a, j = fetch_single_study_xml(candidate_pmid)
-        if t and a:
-            current_pmid = candidate_pmid
-            title, abstract, journal = t, a, j
-            break
-        st.session_state.study_index += 1
-        attempts += 1
+if not api_key:
+    api_key = st.text_input("Bitte Gemini API Key eingeben:", type="password")
 
-# --- Hauptanzeige ---
-if current_pmid:
-    col_left, col_right = st.columns([2, 1])
-    
-    with col_left:
-        st.markdown(f"### {title}")
-        st.caption(f"**Journal:** {journal} | **PMID:** [{current_pmid}](https://pubmed.ncbi.nlm.nih.gov/{current_pmid}/)")
-        
-        api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY")
-        
-        if not api_key:
-            api_key = st.text_input("Bitte Gemini API Key eingeben:", type="password")
+if api_key:
+    with st.spinner(f"Erstelle klinische Übersicht zu „{st.session_state.selected_disease}“..."):
+        try:
+            raw_text = generate_disease_summary(st.session_state.selected_disease, api_key)
+            english_kw = extract_english_keyword(raw_text)
+            display_text = clean_display_text(raw_text)
             
-        if api_key:
-            with st.spinner("Zusammenfassung der Studie wird erstellt..."):
-                try:
-                    raw_summary = summarize_with_ai(title, abstract, api_key)
-                    main_topic = extract_main_topic(raw_summary)
-                    display_summary = clean_display_summary(raw_summary)
+            col_main, col_side = st.columns([2.2, 1])
+            
+            with col_main:
+                st.markdown(display_text)
+                
+            with col_side:
+                st.markdown("### 📊 Schemata & Anatomie")
+                img_url = fetch_schema_image(english_kw)
+                if img_url:
+                    st.image(img_url, caption=f"Schema zu: {st.session_state.selected_disease} ({english_kw})", use_container_width=True)
+                else:
+                    st.info(f"Kein freies Schema zu „{english_kw}“ bei Wikimedia Commons gefunden.")
                     
-                    st.markdown("---")
-                    st.markdown(display_summary)
-                    
-                    with col_right:
-                        st.markdown("### 📊 Thema & Schema")
-                        img_url = fetch_schema_image(main_topic)
-                        if img_url:
-                            st.image(img_url, caption=f"Schematische Übersicht zum Thema: {main_topic}", use_container_width=True)
-                        else:
-                            st.info(f"Kein direktes Schema zu „{main_topic}“ in Open-Access-Datenbanken gefunden.")
-                        
-                        st.markdown("---")
-                        
-                        if st.button(f"💡 Kurzzusammenfassung zu „{main_topic}“", use_container_width=True):
-                            with st.spinner(f"Kurzzusammenfassung zu {main_topic} wird geladen..."):
-                                st.session_state.kw_summary_text = summarize_keyword(main_topic, api_key)
-                        
-                        if "kw_summary_text" in st.session_state:
-                            st.info(st.session_state.kw_summary_text)
-                        
-                        with st.expander("Original Abstract (Englisch) anzeigen"):
-                            st.write(abstract)
-                except Exception as e:
-                    st.error(f"Fehler bei der KI-Generierung: {e}")
-        else:
-            st.warning("Bitte einen API-Schlüssel angeben, um die tägliche deutsche Zusammenfassung zu generieren.")
-
+        except Exception as e:
+            st.error(f"Fehler bei der Generierung: {e}")
 else:
-    st.error("Es konnten keine weiteren Studien mit Abstract abgerufen werden.")
+    st.warning("Bitte gib deinen API-Schlüssel ein, um die Inhalte zu laden.")
