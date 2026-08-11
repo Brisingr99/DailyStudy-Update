@@ -15,10 +15,16 @@ st.set_page_config(
 st.title("🩺 Tägliches Medizinisches Studien-Update")
 st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innerer Medizin")
 
+def get_clean_xml_text(node):
+    """Extrahiert den gesamten Text eines XML-Knotens inkl. Unterelementen (z. B. <i>, <b>)."""
+    if node is not None:
+        return "".join(node.itertext()).strip()
+    return ""
+
 # --- PubMed API Abfrage ---
 @st.cache_data(ttl=86400)
 def fetch_daily_pubmed_study():
-    """Holt aktuelle Studien aus den Ziel-Fachbereichen der letzten 10 Jahre."""
+    """Holt eine aktuelle Studie mit Volltext-Abstract aus den Ziel-Fachbereichen der letzten 10 Jahre."""
     search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     
     params = {
@@ -43,37 +49,46 @@ def fetch_daily_pubmed_study():
             return None, None, None, None
 
         day_seed = int(datetime.date.today().strftime("%Y%m%d"))
-        selected_pmid = id_list[day_seed % len(id_list)]
+        start_idx = day_seed % len(id_list)
         
-        fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-        fetch_params = {
-            "db": "pubmed",
-            "id": selected_pmid,
-            "retmode": "xml"
-        }
+        # Wir testen bis zu 15 Studien, bis wir eine mit vollständigem Abstract finden
+        for i in range(15):
+            selected_pmid = id_list[(start_idx + i) % len(id_list)]
+            
+            fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+            fetch_params = {
+                "db": "pubmed",
+                "id": selected_pmid,
+                "retmode": "xml"
+            }
+            
+            fetch_res = requests.get(fetch_url, params=fetch_params, headers=headers, timeout=10)
+            root = ET.fromstring(fetch_res.content)
+            
+            title_node = root.find(".//ArticleTitle")
+            title = get_clean_xml_text(title_node)
+            
+            abstract_nodes = root.findall(".//AbstractText")
+            abstract_parts = []
+            for node in abstract_nodes:
+                label = node.get("Label", "")
+                text = get_clean_xml_text(node)
+                if text:
+                    if label:
+                        abstract_parts.append(f"**{label}:** {text}")
+                    else:
+                        abstract_parts.append(text)
+            
+            abstract = "\n\n".join(abstract_parts)
+            
+            journal_node = root.find(".//Title")
+            journal = get_clean_xml_text(journal_node) or "Unbekanntes Journal"
+            
+            # Nur zurückgeben, wenn ein valider Titel und ein aussagekräftiger Abstract vorliegen (>100 Zeichen)
+            if title and len(abstract) > 100:
+                return selected_pmid, title, abstract, journal
         
-        fetch_res = requests.get(fetch_url, params=fetch_params, headers=headers, timeout=10)
-        root = ET.fromstring(fetch_res.content)
-        
-        title_node = root.find(".//ArticleTitle")
-        title = title_node.text if title_node is not None else "Kein Titel vorhanden"
-        
-        abstract_nodes = root.findall(".//AbstractText")
-        abstract_parts = []
-        for node in abstract_nodes:
-            label = node.get("Label", "")
-            text = node.text or ""
-            if label:
-                abstract_parts.append(f"**{label}:** {text}")
-            else:
-                abstract_parts.append(text)
-        
-        abstract = "\n\n".join(abstract_parts) if abstract_parts else "Kein Abstract verfügbar."
-        
-        journal_node = root.find(".//Title")
-        journal = journal_node.text if journal_node is not None else "Unbekanntes Journal"
-        
-        return selected_pmid, title, abstract, journal
+        return None, None, None, None
         
     except Exception:
         return None, None, None, None
@@ -123,7 +138,6 @@ def summarize_with_ai(title, abstract, api_key):
     6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
     """
     
-    # 1. Liste aller Modelle abfragen, die Textgenerierung unterstützen
     available_models = []
     try:
         for m in genai.list_models():
@@ -132,20 +146,17 @@ def summarize_with_ai(title, abstract, api_key):
     except Exception:
         pass
     
-    # 2. Kandidatenliste erstellen (aktive Modelle zuerst)
     candidates = available_models + ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-    
-    # Duplikate entfernen
     seen = set()
     unique_candidates = [x for x in candidates if not (x in seen or seen.add(x))]
     
-    # 3. Das erste funktionierende Modell nacheinander durchprobieren
     last_error = None
     for model_name in unique_candidates:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
-            return response.text
+            if response and response.text:
+                return response.text
         except Exception as e:
             last_error = e
             continue
@@ -200,4 +211,4 @@ if pmid:
             st.warning("Bitte einen API-Schlüssel angeben, um die tägliche deutsche Zusammenfassung zu generieren.")
 
 else:
-    st.error("Heute konnten keine Studien abgerufen werden. Bitte versuche es später erneut.")
+    st.error("Heute konnten keine vollständigen Studien mit Abstract abgerufen werden. Bitte versuche es später erneut.")
