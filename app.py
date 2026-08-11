@@ -3,7 +3,7 @@ import requests
 import datetime
 import xml.etree.ElementTree as ET
 import os
-from google import genai
+import google.generativeai as genai
 
 # --- Konfiguration der Seite ---
 st.set_page_config(
@@ -13,15 +13,14 @@ st.set_page_config(
 )
 
 st.title("🩺 Tägliches Medizinisches Studien-Update")
-st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innere Medizin")
+st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innerer Medizin")
 
 # --- PubMed API Abfrage ---
 @st.cache_data(ttl=86400)
 def fetch_daily_pubmed_study():
-    """Holt aktuelle Studien aus den Ziel-Fachbereichen der letzten 30 Tage."""
+    """Holt aktuelle Studien aus den Ziel-Fachbereichen der letzten 10 Jahre."""
     search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     
-    # Robuste Suchparameter mit korrekter URL-Codierung
     params = {
         "db": "pubmed",
         "term": "(Cardiology OR Pneumology OR Gastroenterology OR Endocrinology OR Internal Medicine) AND HASABSTRACT",
@@ -43,11 +42,9 @@ def fetch_daily_pubmed_study():
         if not id_list:
             return None, None, None, None
 
-        # Deterministische Auswahl basierend auf dem heutigen Datum
         day_seed = int(datetime.date.today().strftime("%Y%m%d"))
         selected_pmid = id_list[day_seed % len(id_list)]
         
-        # Details abrufen
         fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         fetch_params = {
             "db": "pubmed",
@@ -108,8 +105,10 @@ def fetch_schema_image(keyword):
 
 # --- KI-Zusammenfassung generieren ---
 def summarize_with_ai(title, abstract, api_key):
-    """Generiert eine strukturierte deutsche Zusammenfassung mit Gemini."""
-    client = genai.Client(api_key=api_key)
+    """Generiert eine strukturierte deutsche Zusammenfassung mit Gemini (stabile API)."""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    
     prompt = f"""
     Du bist ein Experte für medizinische Fachliteratur. Fasse die folgende medizinische Studie präzise, fachlich korrekt und auf Deutsch zusammen.
     
@@ -125,10 +124,7 @@ def summarize_with_ai(title, abstract, api_key):
     6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
     """
     
-    response = client.models.generate_content(
-    model="gemini-2.0-flash",
-    contents=prompt
-)
+    response = model.generate_content(prompt)
     return response.text
 
 # --- Hauptanwendungslogik ---
@@ -150,25 +146,28 @@ if pmid:
             
         if api_key:
             with st.spinner("Zusammenfassung wird erstellt..."):
-                summary = summarize_with_ai(title, abstract, api_key)
-                
-                st.markdown("---")
-                st.markdown(summary)
-                
-                search_kw = title.split()[0]
-                if "Schlagwort für Schema-Suche:" in summary:
-                    search_kw = summary.split("Schlagwort für Schema-Suche:")[-1].strip().split("\n")[0]
-                
-                with col_right:
-                    st.markdown("### 📊 Thema / Schemata")
-                    img_url = fetch_schema_image(search_kw)
-                    if img_url:
-                        st.image(img_url, caption=f"Schematische Übersicht zum Thema: {search_kw}", use_container_width=True)
-                    else:
-                        st.info("Kein direktes Schema in Open-Access-Datenbanken gefunden.")
+                try:
+                    summary = summarize_with_ai(title, abstract, api_key)
                     
-                    with st.expander("Original Abstract (Englisch) anzeigen"):
-                        st.write(abstract)
+                    st.markdown("---")
+                    st.markdown(summary)
+                    
+                    search_kw = title.split()[0]
+                    if "Schlagwort für Schema-Suche:" in summary:
+                        search_kw = summary.split("Schlagwort für Schema-Suche:")[-1].strip().split("\n")[0]
+                    
+                    with col_right:
+                        st.markdown("### 📊 Thema / Schemata")
+                        img_url = fetch_schema_image(search_kw)
+                        if img_url:
+                            st.image(img_url, caption=f"Schematische Übersicht zum Thema: {search_kw}", use_container_width=True)
+                        else:
+                            st.info("Kein direktes Schema in Open-Access-Datenbanken gefunden.")
+                        
+                        with st.expander("Original Abstract (Englisch) anzeigen"):
+                            st.write(abstract)
+                except Exception as e:
+                    st.error(f"Fehler bei der KI-Generierung: {e}")
         else:
             st.warning("Bitte einen API-Schlüssel angeben, um die tägliche deutsche Zusammenfassung zu generieren.")
 
