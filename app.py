@@ -126,9 +126,9 @@ def summarize_with_ai(title, abstract, api_key):
     """
     
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=prompt
-    )
+    model="gemini-2.0-flash",
+    contents=prompt
+)
     return response.text
 
 # --- Hauptanwendungslogik ---
