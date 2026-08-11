@@ -103,11 +103,10 @@ def fetch_schema_image(keyword):
         pass
     return None
 
-# --- KI-Zusammenfassung generieren ---
+# --- KI-Zusammenfassung generieren mit dynamischer Modellerkennung ---
 def summarize_with_ai(title, abstract, api_key):
-    """Generiert eine strukturierte deutsche Zusammenfassung mit Gemini (stabile API)."""
+    """Generiert eine deutsche Zusammenfassung und wählt dynamisch ein funktionierendes Modell."""
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
     
     prompt = f"""
     Du bist ein Experte für medizinische Fachliteratur. Fasse die folgende medizinische Studie präzise, fachlich korrekt und auf Deutsch zusammen.
@@ -124,8 +123,37 @@ def summarize_with_ai(title, abstract, api_key):
     6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
     """
     
-    response = model.generate_content(prompt)
-    return response.text
+    # 1. Liste aller Modelle abfragen, die Textgenerierung unterstützen
+    available_models = []
+    try:
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                available_models.append(m.name.replace("models/", ""))
+    except Exception:
+        pass
+    
+    # 2. Kandidatenliste erstellen (aktive Modelle zuerst)
+    candidates = available_models + ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    
+    # Duplikate entfernen
+    seen = set()
+    unique_candidates = [x for x in candidates if not (x in seen or seen.add(x))]
+    
+    # 3. Das erste funktionierende Modell nacheinander durchprobieren
+    last_error = None
+    for model_name in unique_candidates:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            last_error = e
+            continue
+            
+    if last_error:
+        raise last_error
+    else:
+        raise RuntimeError("Kein passendes Gemini-Modell für diesen API-Schlüssel gefunden.")
 
 # --- Hauptanwendungslogik ---
 pmid, title, abstract, journal = fetch_daily_pubmed_study()
