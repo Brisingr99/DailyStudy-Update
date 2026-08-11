@@ -3,7 +3,6 @@ import requests
 import datetime
 import xml.etree.ElementTree as ET
 import os
-import random
 import google.generativeai as genai
 
 # --- Konfiguration der Seite ---
@@ -52,7 +51,6 @@ def fetch_pubmed_study(offset=0):
         day_seed = int(datetime.date.today().strftime("%Y%m%d"))
         start_idx = (day_seed + offset) % len(id_list)
         
-        # Testet bis zu 15 Studien ab der Startposition, bis eine mit Abstract vorliegt
         for i in range(15):
             selected_pmid = id_list[(start_idx + i) % len(id_list)]
             
@@ -118,25 +116,10 @@ def fetch_schema_image(keyword):
         pass
     return None
 
-# --- KI-Zusammenfassung generieren mit dynamischer Modellerkennung ---
-def summarize_with_ai(title, abstract, api_key):
-    """Generiert eine deutsche Zusammenfassung und wählt dynamisch ein funktionierendes Modell."""
+# --- Gemini KI API Aufruf Helper ---
+def call_gemini_api(prompt, api_key):
+    """Hilfsfunktion zum Ausführen von Gemini Prompts mit automatischer Modellauswahl."""
     genai.configure(api_key=api_key)
-    
-    prompt = f"""
-    Du bist ein Experte für medizinische Fachliteratur. Fasse die folgende medizinische Studie präzise, fachlich korrekt und auf Deutsch zusammen.
-    
-    Titel: {title}
-    Abstract: {abstract}
-    
-    Strukturiere die Antwort in folgende Abschnitte:
-    1. **Fachbereich & Hauptthema** (Kardiologie, Pneumologie, Gastro, Endokrinologie oder Innere Medizin)
-    2. **Hintergrund & Fragestellung**
-    3. **Methodik & Studiendesign**
-    4. **Zentrale Ergebnisse**
-    5. **Klinische Relevanz / Fazit für die Praxis**
-    6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
-    """
     
     available_models = []
     try:
@@ -165,6 +148,40 @@ def summarize_with_ai(title, abstract, api_key):
         raise last_error
     else:
         raise RuntimeError("Kein passendes Gemini-Modell für diesen API-Schlüssel gefunden.")
+
+# --- KI-Zusammenfassung der Studie ---
+def summarize_with_ai(title, abstract, api_key):
+    """Generiert eine strukturierte deutsche Zusammenfassung der Studie."""
+    prompt = f"""
+    Du bist ein Experte für medizinische Fachliteratur. Fasse die folgende medizinische Studie präzise, fachlich korrekt und auf Deutsch zusammen.
+    
+    Titel: {title}
+    Abstract: {abstract}
+    
+    Strukturiere die Antwort in folgende Abschnitte:
+    1. **Fachbereich & Hauptthema** (Kardiologie, Pneumologie, Gastro, Endokrinologie oder Innere Medizin)
+    2. **Hintergrund & Fragestellung**
+    3. **Methodik & Studiendesign**
+    4. **Zentrale Ergebnisse**
+    5. **Klinische Relevanz / Fazit für die Praxis**
+    6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
+    """
+    return call_gemini_api(prompt, api_key)
+
+# --- KI-Kurzzusammenfassung zum Schlagwort ---
+def summarize_keyword(keyword, api_key):
+    """Generiert eine klinische Kurzzusammenfassung zum medizinischen Schlagwort."""
+    prompt = f"""
+    Du bist ein erfahrener Facharzt der Inneren Medizin. Erstelle eine prägnante, klinisch orientierte Kurzzusammenfassung zum Krankheitsbild / Schlagwort: "{keyword}".
+    
+    Gliedere die Antwort kurz in:
+    - **Definition & Leitsymptome**
+    - **Diagnostik & Hauptparameter**
+    - **Therapieprinzipien / Standardtherapie**
+    
+    Halte dich kurz und prägnant (max. 150 Wörter).
+    """
+    return call_gemini_api(prompt, api_key)
 
 # --- Session State für Studien-Wechsel initialisieren ---
 if "study_offset" not in st.session_state:
@@ -197,7 +214,7 @@ if pmid:
             api_key = st.text_input("Bitte Gemini API Key eingeben:", type="password")
             
         if api_key:
-            with st.spinner("Zusammenfassung wird erstellt..."):
+            with st.spinner("Zusammenfassung der Studie wird erstellt..."):
                 try:
                     summary = summarize_with_ai(title, abstract, api_key)
                     
@@ -209,12 +226,20 @@ if pmid:
                         search_kw = summary.split("Schlagwort für Schema-Suche:")[-1].strip().split("\n")[0]
                     
                     with col_right:
-                        st.markdown("### 📊 Thema / Schemata")
+                        st.markdown("### 📊 Thema & Schema")
                         img_url = fetch_schema_image(search_kw)
                         if img_url:
                             st.image(img_url, caption=f"Schematische Übersicht zum Thema: {search_kw}", use_container_width=True)
                         else:
                             st.info("Kein direktes Schema in Open-Access-Datenbanken gefunden.")
+                        
+                        st.markdown("---")
+                        
+                        # Neuer Button für die Kurzzusammenfassung des Schlagworts
+                        if st.button(f"💡 Kurzzusammenfassung zu „{search_kw}“", use_container_width=True):
+                            with st.spinner(f"Kurzzusammenfassung zu {search_kw} wird geladen..."):
+                                kw_summary = summarize_keyword(search_kw, api_key)
+                                st.info(kw_summary)
                         
                         with st.expander("Original Abstract (Englisch) anzeigen"):
                             st.write(abstract)
