@@ -145,13 +145,15 @@ def summarize_with_ai(title, abstract, api_key):
     Titel: {title}
     Abstract: {abstract}
     
-    Strukturiere die Antwort EXAKT in folgende Abschnitte:
-    1. **Fachbereich & Hauptthema** (z. B. Kardiologie: Koronare Herzkrankheit, Pneumologie: Lungenkarzinom)
+    Strukturiere die Antwort in folgende Abschnitte:
+    1. **Fachbereich & Hauptthema**
     2. **Hintergrund & Fragestellung**
     3. **Methodik & Studiendesign**
     4. **Zentrale Ergebnisse**
     5. **Klinische Relevanz / Fazit für die Praxis**
-    6. **Schlagwort**: [Ein prägnantes medizinisches Haupt-Schlagwort/Erkrankung, z. B. "Lungenkarzinom", "KHK", "Asthma", "Heart Failure"]
+
+    Gib ganz am Ende eine eigene Zeile im exakten Format aus:
+    SCHLAGWORT: [Hier genau ein konkretes deutsches Haupt-Krankheitsbild eintragen, z.B. "Lungenkarzinom", "Koronare Herzkrankheit", "Vorhofflimmern", "Asthma bronchiale", "Leberzirrhose"]
     """
     return call_gemini_api(prompt, api_key)
 
@@ -170,24 +172,17 @@ def summarize_keyword(keyword, api_key):
     return call_gemini_api(prompt, api_key)
 
 def extract_main_topic(summary_text):
-    """Extrahiert das Haupt-Schlagwort sauber per Regex aus dem KI-Text."""
-    # 1. Versuch: Punkt 6 (Schlagwort)
-    match_6 = re.search(r"6\.\s*\*\*Schlagwort[^*]*\*\*:?\s*(.+)", summary_text, re.IGNORECASE)
-    if match_6:
-        raw_kw = match_6.group(1).strip()
-        clean_kw = re.sub(r"[\*\_]", "", raw_kw).strip().split("\n")[0].split(",")[0].strip()
-        if clean_kw and len(clean_kw) < 40:
-            return clean_kw
-
-    # 2. Versuch: Punkt 1 (Fachbereich & Hauptthema)
-    match_1 = re.search(r"1\.\s*\*\*Fachbereich[^*]*\*\*:?\s*(.+)", summary_text, re.IGNORECASE)
-    if match_1:
-        raw_topic = match_1.group(1).strip()
-        clean_topic = re.sub(r"[\*\_]", "", raw_topic).strip().split("\n")[0].split("(")[0].strip()
-        if clean_topic and len(clean_topic) < 40:
-            return clean_topic
-
+    """Extrahiert das Haupt-Schlagwort präzise aus der SCHLAGWORT-Zeile."""
+    if "SCHLAGWORT:" in summary_text:
+        raw = summary_text.split("SCHLAGWORT:")[-1].strip().split("\n")[0]
+        clean = re.sub(r"[\[\]\*\_\.\"]", "", raw).strip()
+        if clean and len(clean) < 50:
+            return clean
     return "Hauptthema"
+
+def clean_display_summary(summary_text):
+    """Entfernt die interne SCHLAGWORT-Zeile aus der Anzeige für den Nutzer."""
+    return summary_text.split("SCHLAGWORT:")[0].strip()
 
 # --- Session State Management ---
 id_list = fetch_pubmed_ids()
@@ -241,11 +236,12 @@ if current_pmid:
         if api_key:
             with st.spinner("Zusammenfassung der Studie wird erstellt..."):
                 try:
-                    summary = summarize_with_ai(title, abstract, api_key)
-                    main_topic = extract_main_topic(summary)
+                    raw_summary = summarize_with_ai(title, abstract, api_key)
+                    main_topic = extract_main_topic(raw_summary)
+                    display_summary = clean_display_summary(raw_summary)
                     
                     st.markdown("---")
-                    st.markdown(summary)
+                    st.markdown(display_summary)
                     
                     with col_right:
                         st.markdown("### 📊 Thema & Schema")
