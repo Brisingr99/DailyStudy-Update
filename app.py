@@ -3,6 +3,7 @@ import requests
 import datetime
 import xml.etree.ElementTree as ET
 import os
+import random
 import google.generativeai as genai
 
 # --- Konfiguration der Seite ---
@@ -12,19 +13,19 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🩺 Tägliches Medizinisches Studien-Update")
+st.title("🩺 Medizinisches Studien-Update")
 st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innerer Medizin")
 
 def get_clean_xml_text(node):
-    """Extrahiert den gesamten Text eines XML-Knotens inkl. Unterelementen (z. B. <i>, <b>)."""
+    """Extrahiert den gesamten Text eines XML-Knotens inkl. Unterelementen."""
     if node is not None:
         return "".join(node.itertext()).strip()
     return ""
 
 # --- PubMed API Abfrage ---
 @st.cache_data(ttl=86400)
-def fetch_daily_pubmed_study():
-    """Holt eine aktuelle Studie mit Volltext-Abstract aus den Ziel-Fachbereichen der letzten 10 Jahre."""
+def fetch_pubmed_study(offset=0):
+    """Holt eine Studie mit Volltext-Abstract basierend auf Tages-Seed + Offset."""
     search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     
     params = {
@@ -49,9 +50,9 @@ def fetch_daily_pubmed_study():
             return None, None, None, None
 
         day_seed = int(datetime.date.today().strftime("%Y%m%d"))
-        start_idx = day_seed % len(id_list)
+        start_idx = (day_seed + offset) % len(id_list)
         
-        # Wir testen bis zu 15 Studien, bis wir eine mit vollständigem Abstract finden
+        # Testet bis zu 15 Studien ab der Startposition, bis eine mit Abstract vorliegt
         for i in range(15):
             selected_pmid = id_list[(start_idx + i) % len(id_list)]
             
@@ -84,7 +85,6 @@ def fetch_daily_pubmed_study():
             journal_node = root.find(".//Title")
             journal = get_clean_xml_text(journal_node) or "Unbekanntes Journal"
             
-            # Nur zurückgeben, wenn ein valider Titel und ein aussagekräftiger Abstract vorliegen (>100 Zeichen)
             if title and len(abstract) > 100:
                 return selected_pmid, title, abstract, journal
         
@@ -166,12 +166,25 @@ def summarize_with_ai(title, abstract, api_key):
     else:
         raise RuntimeError("Kein passendes Gemini-Modell für diesen API-Schlüssel gefunden.")
 
+# --- Session State für Studien-Wechsel initialisieren ---
+if "study_offset" not in st.session_state:
+    st.session_state.study_offset = 0
+
+# --- Header mit Aktualisierungs-Button ---
+col_head1, col_head2 = st.columns([3, 1])
+
+with col_head1:
+    st.subheader(f"📅 Studie des Tages ({datetime.date.today().strftime('%d.%m.%Y')})")
+
+with col_head2:
+    if st.button("🎲 Weitere Studie laden", use_container_width=True):
+        st.session_state.study_offset += 1
+        st.rerun()
+
 # --- Hauptanwendungslogik ---
-pmid, title, abstract, journal = fetch_daily_pubmed_study()
+pmid, title, abstract, journal = fetch_pubmed_study(offset=st.session_state.study_offset)
 
 if pmid:
-    st.subheader(f"📅 Studie des Tages ({datetime.date.today().strftime('%d.%m.%Y')})")
-    
     col_left, col_right = st.columns([2, 1])
     
     with col_left:
@@ -211,4 +224,4 @@ if pmid:
             st.warning("Bitte einen API-Schlüssel angeben, um die tägliche deutsche Zusammenfassung zu generieren.")
 
 else:
-    st.error("Heute konnten keine vollständigen Studien mit Abstract abgerufen werden. Bitte versuche es später erneut.")
+    st.error("Es konnten keine weiteren Studien mit Abstract abgerufen werden.")
