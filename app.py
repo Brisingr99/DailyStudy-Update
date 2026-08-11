@@ -54,7 +54,6 @@ def fetch_wikipedia_images(disease_de, disease_en, max_images=4):
     headers = {"User-Agent": "MedRefresherApp/1.0 (medical_education_app)"}
     image_urls = []
     
-    # Ausschlussfilter für Logos, System-Icons und UI-Grafiken
     EXCLUDED_TERMS = [
         "icon", "logo", "flag", "symbol", "stub", "wikisource", "wikimedia", 
         "commons", "question", "edit", "ambox", "disambig", "padlock", "portal", "svg"
@@ -62,6 +61,8 @@ def fetch_wikipedia_images(disease_de, disease_en, max_images=4):
 
     def extract_from_article(title, lang="de"):
         urls = []
+        if not title or title == "None":
+            return urls
         try:
             encoded_title = urllib.parse.quote(title)
             
@@ -102,10 +103,11 @@ def fetch_wikipedia_images(disease_de, disease_en, max_images=4):
             pass
         return urls
 
-    # Erst auf Deutsch suchen
-    image_urls = extract_from_article(disease_de, lang="de")
+    # 1. Deutsche Wikipedia durchsuchen
+    if disease_de:
+        image_urls = extract_from_article(disease_de, lang="de")
     
-    # Falls weniger als max_images gefunden wurden, mit englischem Artikel ergänzen
+    # 2. Falls noch Plätze frei sind, mit englischem Wikipedia-Artikel auffüllen
     if len(image_urls) < max_images and disease_en and disease_en != "Disease":
         en_urls = extract_from_article(disease_en, lang="en")
         for u in en_urls:
@@ -118,7 +120,6 @@ def fetch_wikipedia_images(disease_de, disease_en, max_images=4):
 
 # --- Gemini KI API Helper ---
 def call_gemini_api(prompt, api_key):
-    """Führt Prompts mit automatischer Modellauswahl aus."""
     genai.configure(api_key=api_key)
     
     available_models = []
@@ -153,7 +154,7 @@ def generate_disease_summary(disease_name, api_key):
     """Generiert einen tiefgehenden, detaillierten Fachtext im Stil von AMBOSS/DocCheck."""
     prompt = f"""
     Du bist ein führender Oberarzt der Inneren Medizin und Verfasser medizinischer Standardwerke (wie AMBOSS oder DocCheck Flexikon).
-    Erstelle ein extrem ausführliches, klinikrelevantes und vollständiges Skript zum Krankheitsbild: "{disease_name}".
+    Erstelle ein extrem ausführliches, klinikrelevantes und vollständiges Skript zum Thema: "{disease_name}".
     
     WICHTIG: Schreibe nicht nur Gliederungen oder Stichpunkte ohne Inhalt! Fülle JEDEN Punkt mit konkretem klinischem Wissen, exakten Laborwerten, Scores, Wirkstoffen und Behandlungsschemata aus.
 
@@ -185,21 +186,32 @@ def generate_disease_summary(disease_name, api_key):
     ## 6. Differenzialdiagnosen
     - Die wichtigsten 3–5 Differenzialdiagnosen mit prägnantem Unterscheidungsmerkmal.
 
-    Gib ganz am Ende EXAKT diese Steuerzeile aus:
-    SCHLAGWORT_EN: [Der exakte englische Wikipedia-Artikelname für dieses Thema, z.B. "Aortic stenosis", "Atrial fibrillation", "Pulmonary embolism", "Crohn's disease"]
+    Gib ganz am Ende EXAKT diese zwei Steuerzeilen aus:
+    SCHLAGWORT_DE: [Der exakte deutsche Wikipedia-Artikelname für dieses Thema, z.B. "Aortenklappenstenose", "Pneumonie", "Myokardinfarkt"]
+    SCHLAGWORT_EN: [Der exakte englische Wikipedia-Artikelname für dieses Thema, z.B. "Aortic stenosis", "Pneumonia", "Myocardial infarction"]
     """
     return call_gemini_api(prompt, api_key)
 
-def extract_english_keyword(text):
-    """Extrahiert den englischen Begriff für die Wikipedia-Suche."""
+def extract_keywords(text, default_de):
+    """Extrahiert die korrekten DE- und EN-Wikipedia-Artikelnamen aus den Steuerzeilen."""
+    de_kw = default_de
+    en_kw = "Disease"
+    
+    if "SCHLAGWORT_DE:" in text:
+        raw_de = text.split("SCHLAGWORT_DE:")[1].split("\n")[0]
+        de_kw = re.sub(r"[\[\]\*\_\.\"]", "", raw_de).strip()
+        
     if "SCHLAGWORT_EN:" in text:
-        raw = text.split("SCHLAGWORT_EN:")[-1].split("\n")[0]
-        return re.sub(r"[\[\]\*\_\.\"]", "", raw).strip()
-    return "Disease"
+        raw_en = text.split("SCHLAGWORT_EN:")[1].split("\n")[0]
+        en_kw = re.sub(r"[\[\]\*\_\.\"]", "", raw_en).strip()
+        
+    return de_kw, en_kw
 
 def clean_display_text(text):
-    """Entfernt die Steuerzeile aus der Anzeige."""
-    return text.split("SCHLAGWORT_EN:")[0].strip()
+    """Entfernt die Steuerzeilen aus der Anzeige."""
+    text = text.split("SCHLAGWORT_DE:")[0]
+    text = text.split("SCHLAGWORT_EN:")[0]
+    return text.strip()
 
 # --- Session State Initialisierung ---
 if "selected_disease" not in st.session_state:
@@ -221,10 +233,15 @@ if st.sidebar.button("🎲 Zufälliges Krankheitsbild laden", use_container_widt
     st.rerun()
 
 st.sidebar.markdown("---")
-manual_input = st.sidebar.text_input("Manuelle Suche (beliebiges Thema):")
-if st.sidebar.button("🔍 Suchen", use_container_width=True) and manual_input:
-    st.session_state.selected_disease = manual_input
-    st.rerun()
+
+# --- Manuelle Suche mit st.form (Enter-Taste & Button unterstützt) ---
+with st.sidebar.form("search_form", clear_on_submit=False):
+    manual_input = st.text_input("Manuelle Suche (beliebiges Thema):", placeholder="z. B. Herzinfarkt, Hypertonie...")
+    search_submitted = st.form_submit_button("🔍 Suchen", use_container_width=True)
+    
+    if search_submitted and manual_input.strip():
+        st.session_state.selected_disease = manual_input.strip()
+        st.rerun()
 
 # --- Hauptbereich ---
 st.subheader(f"📋 Refresher: {st.session_state.selected_disease}")
@@ -238,7 +255,7 @@ if api_key:
     with st.spinner(f"Erstelle umfassenden Fachtext zu „{st.session_state.selected_disease}“..."):
         try:
             raw_text = generate_disease_summary(st.session_state.selected_disease, api_key)
-            english_kw = extract_english_keyword(raw_text)
+            de_kw, en_kw = extract_keywords(raw_text, st.session_state.selected_disease)
             display_text = clean_display_text(raw_text)
             
             col_main, col_side = st.columns([2.3, 1])
@@ -248,7 +265,7 @@ if api_key:
                 
             with col_side:
                 st.markdown("### 📊 Schemata & Abbildungen")
-                img_urls = fetch_wikipedia_images(st.session_state.selected_disease, english_kw)
+                img_urls = fetch_wikipedia_images(de_kw, en_kw)
                 
                 if img_urls:
                     st.caption(f"{len(img_urls)} relevante Abbildung(en) geladen:")
