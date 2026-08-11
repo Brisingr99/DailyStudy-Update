@@ -19,49 +19,67 @@ st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologi
 @st.cache_data(ttl=86400)
 def fetch_daily_pubmed_study():
     """Holt aktuelle Studien aus den Ziel-Fachbereichen der letzten 30 Tage."""
-    search_term = (
-        '("Cardiology"[Mesh] OR "Pulmonary Medicine"[Mesh] OR "Gastroenterology"[Mesh] OR '
-        '"Endocrinology"[Mesh] OR "Internal Medicine"[Mesh] OR Cardiology[Title/Abstract] OR '
-        'Pneumology[Title/Abstract] OR Gastroenterology[Title/Abstract] OR Endocrinology[Title/Abstract]) '
-        'AND "has abstract"[text] AND ("last 30 days"[PDat])'
-    )
+    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     
-    # 1. PubMed ESearch
-    search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={search_term}&retmode=json&retmax=50&sort=pub_date"
-    response = requests.get(search_url).json()
-    id_list = response.get("esearchresult", {}).get("idlist", [])
+    # Robuste Suchparameter mit korrekter URL-Codierung
+    params = {
+        "db": "pubmed",
+        "term": "(Cardiology OR Pneumology OR Gastroenterology OR Endocrinology OR Internal Medicine) AND HASABSTRACT",
+        "reldate": 3650,
+        "retmode": "json",
+        "retmax": 500,
+        "sort": "relevance"
+    }
     
-    if not id_list:
-        return None, None, None, None
+    headers = {
+        "User-Agent": "MedUpdateApp/1.0"
+    }
+    
+    try:
+        res = requests.get(search_url, params=params, headers=headers, timeout=10)
+        data = res.json()
+        id_list = data.get("esearchresult", {}).get("idlist", [])
+        
+        if not id_list:
+            return None, None, None, None
 
-    # 2. Deterministische Auswahl basierend auf dem heutigen Datum (rotieren jeden Tag)
-    day_seed = int(datetime.date.today().strftime("%Y%m%d"))
-    selected_pmid = id_list[day_seed % len(id_list)]
-    
-    # 3. PubMed EFetch (Artikel-Details abrufen)
-    fetch_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={selected_pmid}&retmode=xml"
-    fetch_res = requests.get(fetch_url)
-    root = ET.fromstring(fetch_res.content)
-    
-    # Extraktion von Titel und Abstract
-    title_node = root.find(".//ArticleTitle")
-    title = title_node.text if title_node is not None else "Kein Titel vorhanden"
-    
-    abstract_nodes = root.findall(".//AbstractText")
-    abstract_parts = []
-    for node in abstract_nodes:
-        label = node.get("Label", "")
-        text = node.text or ""
-        if label:
-            abstract_parts.append(f"**{label}:** {text}")
-        else:
-            abstract_parts.append(text)
-    
-    abstract = "\n\n".join(abstract_parts) if abstract_parts else "Kein Abstract verfügbar."
-    journal_node = root.find(".//Title")
-    journal = journal_node.text if journal_node is not None else "Unbekanntes Journal"
-    
-    return selected_pmid, title, abstract, journal
+        # Deterministische Auswahl basierend auf dem heutigen Datum
+        day_seed = int(datetime.date.today().strftime("%Y%m%d"))
+        selected_pmid = id_list[day_seed % len(id_list)]
+        
+        # Details abrufen
+        fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        fetch_params = {
+            "db": "pubmed",
+            "id": selected_pmid,
+            "retmode": "xml"
+        }
+        
+        fetch_res = requests.get(fetch_url, params=fetch_params, headers=headers, timeout=10)
+        root = ET.fromstring(fetch_res.content)
+        
+        title_node = root.find(".//ArticleTitle")
+        title = title_node.text if title_node is not None else "Kein Titel vorhanden"
+        
+        abstract_nodes = root.findall(".//AbstractText")
+        abstract_parts = []
+        for node in abstract_nodes:
+            label = node.get("Label", "")
+            text = node.text or ""
+            if label:
+                abstract_parts.append(f"**{label}:** {text}")
+            else:
+                abstract_parts.append(text)
+        
+        abstract = "\n\n".join(abstract_parts) if abstract_parts else "Kein Abstract verfügbar."
+        
+        journal_node = root.find(".//Title")
+        journal = journal_node.text if journal_node is not None else "Unbekanntes Journal"
+        
+        return selected_pmid, title, abstract, journal
+        
+    except Exception:
+        return None, None, None, None
 
 # --- Abbildung / Schema Abfrage (Wikimedia Commons API) ---
 @st.cache_data(ttl=86400)
@@ -78,7 +96,7 @@ def fetch_schema_image(keyword):
         "iiprop": "url"
     }
     try:
-        r = requests.get(url, params=params).json()
+        r = requests.get(url, params=params, timeout=10).json()
         pages = r.get("query", {}).get("pages", {})
         for _, page in pages.items():
             imageinfo = page.get("imageinfo", [])
@@ -125,21 +143,18 @@ if pmid:
         st.markdown(f"### {title}")
         st.caption(f"**Journal:** {journal} | **PMID:** [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
         
-        # API Key Abfrage (aus Secrets oder Benutzereingabe)
         api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY")
         
         if not api_key:
-            api_key = st.text_input("Bitte Gemini API Key eingeben (für die automatische Übersetzung & Zusammenfassung):", type="password")
+            api_key = st.text_input("Bitte Gemini API Key eingeben:", type="password")
             
         if api_key:
             with st.spinner("Zusammenfassung wird erstellt..."):
                 summary = summarize_with_ai(title, abstract, api_key)
                 
-                # Zusammenfassung anzeigen
                 st.markdown("---")
                 st.markdown(summary)
                 
-                # Schlagwort für Bildsuche extrahieren (einfache Logik)
                 search_kw = title.split()[0]
                 if "Schlagwort für Schema-Suche:" in summary:
                     search_kw = summary.split("Schlagwort für Schema-Suche:")[-1].strip().split("\n")[0]
