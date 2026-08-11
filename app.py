@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("🩺 Tägliches Medizinisches Studien-Update")
-st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innerer Medizin")
+st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innere Medizin")
 
 # --- PubMed API Abfrage ---
 @st.cache_data(ttl=86400)
@@ -126,7 +126,7 @@ def summarize_with_ai(title, abstract, api_key):
     """
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-1.5-flash",
         contents=prompt
     )
     return response.text
