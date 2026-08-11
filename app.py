@@ -1,0 +1,161 @@
+import streamlit as st
+import requests
+import datetime
+import xml.etree.ElementTree as ET
+import os
+from google import genai
+
+# --- Konfiguration der Seite ---
+st.set_page_config(
+    page_title="Tägliches Med-Update",
+    page_icon="🩺",
+    layout="wide"
+)
+
+st.title("🩺 Tägliches Medizinisches Studien-Update")
+st.caption("Aktuelle Erkenntnisse aus Kardiologie, Pneumologie, Gastroenterologie, Endokrinologie & Innerer Medizin")
+
+# --- PubMed API Abfrage ---
+@st.cache_data(ttl=86400)
+def fetch_daily_pubmed_study():
+    """Holt aktuelle Studien aus den Ziel-Fachbereichen der letzten 30 Tage."""
+    search_term = (
+        '("Cardiology"[Mesh] OR "Pulmonary Medicine"[Mesh] OR "Gastroenterology"[Mesh] OR '
+        '"Endocrinology"[Mesh] OR "Internal Medicine"[Mesh] OR Cardiology[Title/Abstract] OR '
+        'Pneumology[Title/Abstract] OR Gastroenterology[Title/Abstract] OR Endocrinology[Title/Abstract]) '
+        'AND "has abstract"[text] AND ("last 30 days"[PDat])'
+    )
+    
+    # 1. PubMed ESearch
+    search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={search_term}&retmode=json&retmax=50&sort=pub_date"
+    response = requests.get(search_url).json()
+    id_list = response.get("esearchresult", {}).get("idlist", [])
+    
+    if not id_list:
+        return None, None, None, None
+
+    # 2. Deterministische Auswahl basierend auf dem heutigen Datum (rotieren jeden Tag)
+    day_seed = int(datetime.date.today().strftime("%Y%m%d"))
+    selected_pmid = id_list[day_seed % len(id_list)]
+    
+    # 3. PubMed EFetch (Artikel-Details abrufen)
+    fetch_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={selected_pmid}&retmode=xml"
+    fetch_res = requests.get(fetch_url)
+    root = ET.fromstring(fetch_res.content)
+    
+    # Extraktion von Titel und Abstract
+    title_node = root.find(".//ArticleTitle")
+    title = title_node.text if title_node is not None else "Kein Titel vorhanden"
+    
+    abstract_nodes = root.findall(".//AbstractText")
+    abstract_parts = []
+    for node in abstract_nodes:
+        label = node.get("Label", "")
+        text = node.text or ""
+        if label:
+            abstract_parts.append(f"**{label}:** {text}")
+        else:
+            abstract_parts.append(text)
+    
+    abstract = "\n\n".join(abstract_parts) if abstract_parts else "Kein Abstract verfügbar."
+    journal_node = root.find(".//Title")
+    journal = journal_node.text if journal_node is not None else "Unbekanntes Journal"
+    
+    return selected_pmid, title, abstract, journal
+
+# --- Abbildung / Schema Abfrage (Wikimedia Commons API) ---
+@st.cache_data(ttl=86400)
+def fetch_schema_image(keyword):
+    """Sucht nach einem passenden medizinischen Schema/Diagramm bei Wikimedia Commons."""
+    url = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "format": "json",
+        "generator": "search",
+        "gsrsearch": f"{keyword} diagram OR schema OR anatomy",
+        "gsrlimit": 1,
+        "prop": "imageinfo",
+        "iiprop": "url"
+    }
+    try:
+        r = requests.get(url, params=params).json()
+        pages = r.get("query", {}).get("pages", {})
+        for _, page in pages.items():
+            imageinfo = page.get("imageinfo", [])
+            if imageinfo:
+                return imageinfo[0]["url"]
+    except Exception:
+        pass
+    return None
+
+# --- KI-Zusammenfassung generieren ---
+def summarize_with_ai(title, abstract, api_key):
+    """Generiert eine strukturierte deutsche Zusammenfassung mit Gemini."""
+    client = genai.Client(api_key=api_key)
+    prompt = f"""
+    Du bist ein Experte für medizinische Fachliteratur. Fasse die folgende medizinische Studie präzise, fachlich korrekt und auf Deutsch zusammen.
+    
+    Titel: {title}
+    Abstract: {abstract}
+    
+    Strukturiere die Antwort in folgende Abschnitte:
+    1. **Fachbereich & Hauptthema** (Kardiologie, Pneumologie, Gastro, Endokrinologie oder Innere Medizin)
+    2. **Hintergrund & Fragestellung**
+    3. **Methodik & Studiendesign**
+    4. **Zentrale Ergebnisse**
+    5. **Klinische Relevanz / Fazit für die Praxis**
+    6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
+    """
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    return response.text
+
+# --- Hauptanwendungslogik ---
+pmid, title, abstract, journal = fetch_daily_pubmed_study()
+
+if pmid:
+    st.subheader(f"📅 Studie des Tages ({datetime.date.today().strftime('%d.%m.%Y')})")
+    
+    col_left, col_right = st.columns([2, 1])
+    
+    with col_left:
+        st.markdown(f"### {title}")
+        st.caption(f"**Journal:** {journal} | **PMID:** [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
+        
+        # API Key Abfrage (aus Secrets oder Benutzereingabe)
+        api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY")
+        
+        if not api_key:
+            api_key = st.text_input("Bitte Gemini API Key eingeben (für die automatische Übersetzung & Zusammenfassung):", type="password")
+            
+        if api_key:
+            with st.spinner("Zusammenfassung wird erstellt..."):
+                summary = summarize_with_ai(title, abstract, api_key)
+                
+                # Zusammenfassung anzeigen
+                st.markdown("---")
+                st.markdown(summary)
+                
+                # Schlagwort für Bildsuche extrahieren (einfache Logik)
+                search_kw = title.split()[0]
+                if "Schlagwort für Schema-Suche:" in summary:
+                    search_kw = summary.split("Schlagwort für Schema-Suche:")[-1].strip().split("\n")[0]
+                
+                with col_right:
+                    st.markdown("### 📊 Thema / Schemata")
+                    img_url = fetch_schema_image(search_kw)
+                    if img_url:
+                        st.image(img_url, caption=f"Schematische Übersicht zum Thema: {search_kw}", use_container_width=True)
+                    else:
+                        st.info("Kein direktes Schema in Open-Access-Datenbanken gefunden.")
+                    
+                    with st.expander("Original Abstract (Englisch) anzeigen"):
+                        st.write(abstract)
+        else:
+            st.warning("Bitte einen API-Schlüssel angeben, um die tägliche deutsche Zusammenfassung zu generieren.")
+
+else:
+    st.error("Heute konnten keine Studien abgerufen werden. Bitte versuche es später erneut.")
