@@ -3,6 +3,7 @@ import requests
 import datetime
 import xml.etree.ElementTree as ET
 import os
+import re
 import google.generativeai as genai
 
 # --- Konfiguration der Seite ---
@@ -21,12 +22,11 @@ def get_clean_xml_text(node):
         return "".join(node.itertext()).strip()
     return ""
 
-# --- PubMed API Abfrage ---
+# --- PubMed API Abfragen ---
 @st.cache_data(ttl=86400)
-def fetch_pubmed_study(offset=0):
-    """Holt eine Studie mit Volltext-Abstract basierend auf Tages-Seed + Offset."""
+def fetch_pubmed_ids():
+    """Holt die Liste der PubMed-IDs für die Zielbereiche der letzten 10 Jahre."""
     search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    
     params = {
         "db": "pubmed",
         "term": "(Cardiology OR Pneumology OR Gastroenterology OR Endocrinology OR Internal Medicine) AND HASABSTRACT",
@@ -35,61 +35,49 @@ def fetch_pubmed_study(offset=0):
         "retmax": 500,
         "sort": "relevance"
     }
-    
-    headers = {
-        "User-Agent": "MedUpdateApp/1.0"
-    }
+    headers = {"User-Agent": "MedUpdateApp/1.0"}
     
     try:
         res = requests.get(search_url, params=params, headers=headers, timeout=10)
         data = res.json()
-        id_list = data.get("esearchresult", {}).get("idlist", [])
-        
-        if not id_list:
-            return None, None, None, None
-
-        day_seed = int(datetime.date.today().strftime("%Y%m%d"))
-        start_idx = (day_seed + offset) % len(id_list)
-        
-        for i in range(15):
-            selected_pmid = id_list[(start_idx + i) % len(id_list)]
-            
-            fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-            fetch_params = {
-                "db": "pubmed",
-                "id": selected_pmid,
-                "retmode": "xml"
-            }
-            
-            fetch_res = requests.get(fetch_url, params=fetch_params, headers=headers, timeout=10)
-            root = ET.fromstring(fetch_res.content)
-            
-            title_node = root.find(".//ArticleTitle")
-            title = get_clean_xml_text(title_node)
-            
-            abstract_nodes = root.findall(".//AbstractText")
-            abstract_parts = []
-            for node in abstract_nodes:
-                label = node.get("Label", "")
-                text = get_clean_xml_text(node)
-                if text:
-                    if label:
-                        abstract_parts.append(f"**{label}:** {text}")
-                    else:
-                        abstract_parts.append(text)
-            
-            abstract = "\n\n".join(abstract_parts)
-            
-            journal_node = root.find(".//Title")
-            journal = get_clean_xml_text(journal_node) or "Unbekanntes Journal"
-            
-            if title and len(abstract) > 100:
-                return selected_pmid, title, abstract, journal
-        
-        return None, None, None, None
-        
+        return data.get("esearchresult", {}).get("idlist", [])
     except Exception:
-        return None, None, None, None
+        return []
+
+@st.cache_data(ttl=86400)
+def fetch_single_study_xml(pmid):
+    """Holt Titel, Abstract und Journal für eine spezifische PMID."""
+    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    fetch_params = {"db": "pubmed", "id": pmid, "retmode": "xml"}
+    headers = {"User-Agent": "MedUpdateApp/1.0"}
+    
+    try:
+        fetch_res = requests.get(fetch_url, params=fetch_params, headers=headers, timeout=10)
+        root = ET.fromstring(fetch_res.content)
+        
+        title_node = root.find(".//ArticleTitle")
+        title = get_clean_xml_text(title_node)
+        
+        abstract_nodes = root.findall(".//AbstractText")
+        abstract_parts = []
+        for node in abstract_nodes:
+            label = node.get("Label", "")
+            text = get_clean_xml_text(node)
+            if text:
+                if label:
+                    abstract_parts.append(f"**{label}:** {text}")
+                else:
+                    abstract_parts.append(text)
+        
+        abstract = "\n\n".join(abstract_parts)
+        journal_node = root.find(".//Title")
+        journal = get_clean_xml_text(journal_node) or "Unbekanntes Journal"
+        
+        if title and len(abstract) > 100:
+            return title, abstract, journal
+    except Exception:
+        pass
+    return None, None, None
 
 # --- Abbildung / Schema Abfrage (Wikimedia Commons API) ---
 @st.cache_data(ttl=86400)
@@ -116,7 +104,7 @@ def fetch_schema_image(keyword):
         pass
     return None
 
-# --- Gemini KI API Aufruf Helper ---
+# --- Gemini KI API Helper ---
 def call_gemini_api(prompt, api_key):
     """Hilfsfunktion zum Ausführen von Gemini Prompts mit automatischer Modellauswahl."""
     genai.configure(api_key=api_key)
@@ -149,7 +137,6 @@ def call_gemini_api(prompt, api_key):
     else:
         raise RuntimeError("Kein passendes Gemini-Modell für diesen API-Schlüssel gefunden.")
 
-# --- KI-Zusammenfassung der Studie ---
 def summarize_with_ai(title, abstract, api_key):
     """Generiert eine strukturierte deutsche Zusammenfassung der Studie."""
     prompt = f"""
@@ -158,34 +145,56 @@ def summarize_with_ai(title, abstract, api_key):
     Titel: {title}
     Abstract: {abstract}
     
-    Strukturiere die Antwort in folgende Abschnitte:
-    1. **Fachbereich & Hauptthema** (Kardiologie, Pneumologie, Gastro, Endokrinologie oder Innere Medizin)
+    Strukturiere die Antwort EXAKT in folgende Abschnitte:
+    1. **Fachbereich & Hauptthema** (z. B. Kardiologie: Koronare Herzkrankheit, Pneumologie: Lungenkarzinom)
     2. **Hintergrund & Fragestellung**
     3. **Methodik & Studiendesign**
     4. **Zentrale Ergebnisse**
     5. **Klinische Relevanz / Fazit für die Praxis**
-    6. **Schlagwort für Schema-Suche** (Ein einziges englisches Haupt-Suchwort zur Erkrankung/Anatomie, z.B. "Heart failure", "Asthma", "Cirrhosis")
+    6. **Schlagwort**: [Ein prägnantes medizinisches Haupt-Schlagwort/Erkrankung, z. B. "Lungenkarzinom", "KHK", "Asthma", "Heart Failure"]
     """
     return call_gemini_api(prompt, api_key)
 
-# --- KI-Kurzzusammenfassung zum Schlagwort ---
 def summarize_keyword(keyword, api_key):
-    """Generiert eine klinische Kurzzusammenfassung zum medizinischen Schlagwort."""
+    """Generiert eine klinische Kurzzusammenfassung zum medizinischen Hauptthema."""
     prompt = f"""
-    Du bist ein erfahrener Facharzt der Inneren Medizin. Erstelle eine prägnante, klinisch orientierte Kurzzusammenfassung zum Krankheitsbild / Schlagwort: "{keyword}".
+    Du bist ein erfahrener Facharzt der Inneren Medizin. Erstelle eine prägnante, klinisch orientierte Kurzzusammenfassung zum Krankheitsbild: "{keyword}".
     
-    Gliedere die Antwort kurz in:
+    Gliedere die Antwort präzise in:
     - **Definition & Leitsymptome**
     - **Diagnostik & Hauptparameter**
     - **Therapieprinzipien / Standardtherapie**
     
-    Halte dich kurz und prägnant (max. 150 Wörter).
+    Halte dich kurz und übersichtlich (max. 150 Wörter).
     """
     return call_gemini_api(prompt, api_key)
 
-# --- Session State für Studien-Wechsel initialisieren ---
-if "study_offset" not in st.session_state:
-    st.session_state.study_offset = 0
+def extract_main_topic(summary_text):
+    """Extrahiert das Haupt-Schlagwort sauber per Regex aus dem KI-Text."""
+    # 1. Versuch: Punkt 6 (Schlagwort)
+    match_6 = re.search(r"6\.\s*\*\*Schlagwort[^*]*\*\*:?\s*(.+)", summary_text, re.IGNORECASE)
+    if match_6:
+        raw_kw = match_6.group(1).strip()
+        clean_kw = re.sub(r"[\*\_]", "", raw_kw).strip().split("\n")[0].split(",")[0].strip()
+        if clean_kw and len(clean_kw) < 40:
+            return clean_kw
+
+    # 2. Versuch: Punkt 1 (Fachbereich & Hauptthema)
+    match_1 = re.search(r"1\.\s*\*\*Fachbereich[^*]*\*\*:?\s*(.+)", summary_text, re.IGNORECASE)
+    if match_1:
+        raw_topic = match_1.group(1).strip()
+        clean_topic = re.sub(r"[\*\_]", "", raw_topic).strip().split("\n")[0].split("(")[0].strip()
+        if clean_topic and len(clean_topic) < 40:
+            return clean_topic
+
+    return "Hauptthema"
+
+# --- Session State Management ---
+id_list = fetch_pubmed_ids()
+
+if "study_index" not in st.session_state:
+    day_seed = int(datetime.date.today().strftime("%Y%m%d"))
+    st.session_state.study_index = (day_seed % len(id_list)) if id_list else 0
 
 # --- Header mit Aktualisierungs-Button ---
 col_head1, col_head2 = st.columns([3, 1])
@@ -195,18 +204,34 @@ with col_head1:
 
 with col_head2:
     if st.button("🎲 Weitere Studie laden", use_container_width=True):
-        st.session_state.study_offset += 1
+        st.session_state.study_index += 1
+        if "kw_summary_text" in st.session_state:
+            del st.session_state["kw_summary_text"]
         st.rerun()
 
-# --- Hauptanwendungslogik ---
-pmid, title, abstract, journal = fetch_pubmed_study(offset=st.session_state.study_offset)
+# --- Studie ermitteln ---
+current_pmid = None
+title, abstract, journal = None, None, None
 
-if pmid:
+if id_list:
+    attempts = 0
+    while attempts < 30:
+        candidate_pmid = id_list[st.session_state.study_index % len(id_list)]
+        t, a, j = fetch_single_study_xml(candidate_pmid)
+        if t and a:
+            current_pmid = candidate_pmid
+            title, abstract, journal = t, a, j
+            break
+        st.session_state.study_index += 1
+        attempts += 1
+
+# --- Hauptanzeige ---
+if current_pmid:
     col_left, col_right = st.columns([2, 1])
     
     with col_left:
         st.markdown(f"### {title}")
-        st.caption(f"**Journal:** {journal} | **PMID:** [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
+        st.caption(f"**Journal:** {journal} | **PMID:** [{current_pmid}](https://pubmed.ncbi.nlm.nih.gov/{current_pmid}/)")
         
         api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY")
         
@@ -217,29 +242,27 @@ if pmid:
             with st.spinner("Zusammenfassung der Studie wird erstellt..."):
                 try:
                     summary = summarize_with_ai(title, abstract, api_key)
+                    main_topic = extract_main_topic(summary)
                     
                     st.markdown("---")
                     st.markdown(summary)
                     
-                    search_kw = title.split()[0]
-                    if "Schlagwort für Schema-Suche:" in summary:
-                        search_kw = summary.split("Schlagwort für Schema-Suche:")[-1].strip().split("\n")[0]
-                    
                     with col_right:
                         st.markdown("### 📊 Thema & Schema")
-                        img_url = fetch_schema_image(search_kw)
+                        img_url = fetch_schema_image(main_topic)
                         if img_url:
-                            st.image(img_url, caption=f"Schematische Übersicht zum Thema: {search_kw}", use_container_width=True)
+                            st.image(img_url, caption=f"Schematische Übersicht zum Thema: {main_topic}", use_container_width=True)
                         else:
-                            st.info("Kein direktes Schema in Open-Access-Datenbanken gefunden.")
+                            st.info(f"Kein direktes Schema zu „{main_topic}“ in Open-Access-Datenbanken gefunden.")
                         
                         st.markdown("---")
                         
-                        # Neuer Button für die Kurzzusammenfassung des Schlagworts
-                        if st.button(f"💡 Kurzzusammenfassung zu „{search_kw}“", use_container_width=True):
-                            with st.spinner(f"Kurzzusammenfassung zu {search_kw} wird geladen..."):
-                                kw_summary = summarize_keyword(search_kw, api_key)
-                                st.info(kw_summary)
+                        if st.button(f"💡 Kurzzusammenfassung zu „{main_topic}“", use_container_width=True):
+                            with st.spinner(f"Kurzzusammenfassung zu {main_topic} wird geladen..."):
+                                st.session_state.kw_summary_text = summarize_keyword(main_topic, api_key)
+                        
+                        if "kw_summary_text" in st.session_state:
+                            st.info(st.session_state.kw_summary_text)
                         
                         with st.expander("Original Abstract (Englisch) anzeigen"):
                             st.write(abstract)
