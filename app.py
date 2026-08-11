@@ -20,7 +20,7 @@ st.caption("Umfassende & strukturierte Facharzt-Übersichten (im Stil von AMBOSS
 DISEASES = {
     "Kardiologie": [
         "Aortenklappenstenose", "Vorhofflimmern", "Herzinsuffizienz", 
-        "Akutes Koronarsyndrom", "Myokarditis", "Kardiogenes Schock", 
+        "Akutes Koronarsyndrom", "Myokarditis", "Kardiogener Schock", 
         "Infektiöse Endokarditis", "AV-Knoten-Reentry-Tachykardie"
     ],
     "Pneumologie": [
@@ -47,42 +47,74 @@ DISEASES = {
 
 ALL_DISEASES = [disease for group in DISEASES.values() for disease in group]
 
-# --- Kuratierte Bildsuche via Wikipedia REST-API (DE & EN) ---
+# --- Kuratierte Multi-Bildsuche via Wikipedia REST-API ---
 @st.cache_data(ttl=86400)
-def fetch_wikipedia_image(disease_de, disease_en):
-    """Holt das kuratierte Hauptbild des entsprechenden Wikipedia-Artikels."""
+def fetch_wikipedia_images(disease_de, disease_en, max_images=4):
+    """Holt bis zu max_images relevante Abbildungen/Schemata aus dem DE & EN Wikipedia-Artikel."""
     headers = {"User-Agent": "MedRefresherApp/1.0 (medical_education_app)"}
+    image_urls = []
     
-    # 1. Versuch: Deutsche Wikipedia
-    try:
-        encoded_de = urllib.parse.quote(disease_de)
-        url_de = f"https://de.wikipedia.org/api/rest_v1/page/summary/{encoded_de}"
-        res = requests.get(url_de, headers=headers, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            if "originalimage" in data:
-                return data["originalimage"]["source"]
-            elif "thumbnail" in data:
-                return data["thumbnail"]["source"]
-    except Exception:
-        pass
+    # Ausschlussfilter für Logos, System-Icons und UI-Grafiken
+    EXCLUDED_TERMS = [
+        "icon", "logo", "flag", "symbol", "stub", "wikisource", "wikimedia", 
+        "commons", "question", "edit", "ambox", "disambig", "padlock", "portal", "svg"
+    ]
 
-    # 2. Versuch: Englische Wikipedia (falls DE kein Bild hat oder Artikelname abweicht)
-    if disease_en and disease_en != "Disease":
+    def extract_from_article(title, lang="de"):
+        urls = []
         try:
-            encoded_en = urllib.parse.quote(disease_en)
-            url_en = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded_en}"
-            res = requests.get(url_en, headers=headers, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                if "originalimage" in data:
-                    return data["originalimage"]["source"]
-                elif "thumbnail" in data:
-                    return data["thumbnail"]["source"]
+            encoded_title = urllib.parse.quote(title)
+            
+            # 1. Hauptbild/Titelbild abfragen
+            summary_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{encoded_title}"
+            s_res = requests.get(summary_url, headers=headers, timeout=5)
+            if s_res.status_code == 200:
+                s_data = s_res.json()
+                main_img = s_data.get("originalimage", {}).get("source") or s_data.get("thumbnail", {}).get("source")
+                if main_img and not any(ex in main_img.lower() for ex in EXCLUDED_TERMS):
+                    urls.append(main_img)
+
+            # 2. Relevante Medienliste der Seite abfragen
+            media_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/media-list/{encoded_title}"
+            m_res = requests.get(media_url, headers=headers, timeout=5)
+            if m_res.status_code == 200:
+                m_data = m_res.json()
+                for item in m_data.get("items", []):
+                    if item.get("type") == "image":
+                        srcset = item.get("srcset", [])
+                        img_src = srcset[-1].get("src") if srcset else None
+                        
+                        if not img_src:
+                            file_title = item.get("title", "")
+                            if file_title.startswith("File:") or file_title.startswith("Datei:"):
+                                clean_name = file_title.split(":", 1)[1].strip()
+                                img_src = f"https://commons.wikimedia.org/wiki/Special:FilePath/{urllib.parse.quote(clean_name)}?width=800"
+                        
+                        if img_src and img_src.startswith("//"):
+                            img_src = "https:" + img_src
+                            
+                        if img_src and not any(ex in img_src.lower() for ex in EXCLUDED_TERMS):
+                            if img_src not in urls:
+                                urls.append(img_src)
+                                if len(urls) >= max_images:
+                                    break
         except Exception:
             pass
+        return urls
 
-    return None
+    # Erst auf Deutsch suchen
+    image_urls = extract_from_article(disease_de, lang="de")
+    
+    # Falls weniger als max_images gefunden wurden, mit englischem Artikel ergänzen
+    if len(image_urls) < max_images and disease_en and disease_en != "Disease":
+        en_urls = extract_from_article(disease_en, lang="en")
+        for u in en_urls:
+            if u not in image_urls:
+                image_urls.append(u)
+            if len(image_urls) >= max_images:
+                break
+                
+    return image_urls[:max_images]
 
 # --- Gemini KI API Helper ---
 def call_gemini_api(prompt, api_key):
@@ -215,12 +247,19 @@ if api_key:
                 st.markdown(display_text)
                 
             with col_side:
-                st.markdown("### 📊 Schema / Abbildung")
-                img_url = fetch_wikipedia_image(st.session_state.selected_disease, english_kw)
-                if img_url:
-                    st.image(img_url, caption=f"Kuratierte Abbildung aus Wikipedia: {st.session_state.selected_disease}", use_container_width=True)
+                st.markdown("### 📊 Schemata & Abbildungen")
+                img_urls = fetch_wikipedia_images(st.session_state.selected_disease, english_kw)
+                
+                if img_urls:
+                    st.caption(f"{len(img_urls)} relevante Abbildung(en) geladen:")
+                    for idx, url in enumerate(img_urls, start=1):
+                        st.image(
+                            url, 
+                            caption=f"Abbildung {idx}: {st.session_state.selected_disease}", 
+                            use_container_width=True
+                        )
                 else:
-                    st.info(f"Keine direkte Abbildung im Wikipedia-Artikel zu „{st.session_state.selected_disease}“ vorhanden.")
+                    st.info(f"Keine direkten Abbildungen im Wikipedia-Artikel zu „{st.session_state.selected_disease}“ gefunden.")
                     
         except Exception as e:
             st.error(f"Fehler bei der Generierung: {e}")
