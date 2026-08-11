@@ -3,6 +3,7 @@ import requests
 import random
 import re
 import os
+import urllib.parse
 import google.generativeai as genai
 
 # --- Konfiguration der Seite ---
@@ -13,79 +14,74 @@ st.set_page_config(
 )
 
 st.title("🩺 Klinisches Refresher-Tool: Krankheitsbilder")
-st.caption("Kompakte & strukturierte Übersichten für die Innere Medizin")
+st.caption("Umfassende & strukturierte Facharzt-Übersichten (im Stil von AMBOSS / DocCheck)")
 
 # --- Umfangreicher Pool an Krankheitsbildern ---
 DISEASES = {
     "Kardiologie": [
-        "Aortenklappenstenose", "Vorhofflimmern", "Herzinsuffizienz (HFrEF)", 
-        "Akutes Koronarsyndrom (NSTEMI/STEMI)", "Myokarditis", "Hypertonie", 
-        "Infektiöse Endokarditis", "AV-Knoten-Reentry-Tachykardie (AVNRT)"
+        "Aortenklappenstenose", "Vorhofflimmern", "Herzinsuffizienz", 
+        "Akutes Koronarsyndrom", "Myokarditis", "Kardiogenes Schock", 
+        "Infektiöse Endokarditis", "AV-Knoten-Reentry-Tachykardie"
     ],
     "Pneumologie": [
-        "COPD-Exazerbation", "Bronchialkarzinom", "Idiopatische Lungenfibrose", 
-        "Lungenarterienembolie", "Asthma bronchiale", "Ambulant erworbene Pneumonie", 
+        "COPD", "Bronchialkarzinom", "Idiopatische Lungenfibrose", 
+        "Lungenarterienembolie", "Asthma bronchiale", "Pneumonie", 
         "Sarkoidose", "Pneumothorax"
     ],
     "Gastroenterologie & Hepatologie": [
-        "Colitis ulcerosa", "Morbus Crohn", "Dekompensierte Leberzirrhose", 
-        "Akute Pankreatitis", "Refluxkrankheit (GERD)", "Zöliakie", 
-        "Hepatozelluläres Karzinom (HCC)", "Gastrointestinale Blutung"
+        "Colitis ulcerosa", "Morbus Crohn", "Leberzirrhose", 
+        "Akute Pankreatitis", "Gastroösophageale Refluxkrankheit", "Zöliakie", 
+        "Hepatozelluläres Karzinom", "Gastrointestinale Blutung"
     ],
     "Endokrinologie & Diabetologie": [
-        "Diabetes mellitus Typ 2", "Hyperthyreose / Morbus Basedow", 
-        "Primärer Hyperparathyroidismus", "Cushing-Syndrom", 
-        "Nebennierenrindeninsuffizienz (Morbus Addison)", "Diabetische Ketoazidose"
+        "Diabetes mellitus", "Hyperthyreose", 
+        "Hyperparathyreoidismus", "Cushing-Syndrom", 
+        "Nebennierenrindeninsuffizienz", "Diabetische Ketoazidose"
     ],
     "Nephrologie & Rheumatologie": [
-        "Akutes Nierenversagen", "Chronische Nierenerkrankung (CKD)", 
+        "Akutes Nierenversagen", "Chronische Nierenerkrankung", 
         "Glomerulonephritis", "Rheumatoide Arthritis", "Systemischer Lupus erythematodes", 
-        "Gichtarthritis", "ANCA-assoziierte Vaskulitis"
+        "Gicht", "ANCA-assoziierte Vaskulitis"
     ]
 }
 
-# Flache Liste aller Krankheitsbilder für die Zufallsauswahl
 ALL_DISEASES = [disease for group in DISEASES.values() for disease in group]
 
-# --- Wikimedia Commons Schemasuche ---
+# --- Kuratierte Bildsuche via Wikipedia REST-API (DE & EN) ---
 @st.cache_data(ttl=86400)
-def fetch_schema_image(english_keyword):
-    """Sucht nach medizinischen Diagrammen bei Wikimedia Commons."""
-    if not english_keyword or english_keyword == "Disease":
-        return None
-        
-    url = "https://commons.wikimedia.org/w/api.php"
-    headers = {"User-Agent": "MedRefresherApp/1.0"}
+def fetch_wikipedia_image(disease_de, disease_en):
+    """Holt das kuratierte Hauptbild des entsprechenden Wikipedia-Artikels."""
+    headers = {"User-Agent": "MedRefresherApp/1.0 (medical_education_app)"}
     
-    search_queries = [
-        f"{english_keyword} diagram",
-        f"{english_keyword} anatomy",
-        f"{english_keyword} schema",
-        english_keyword
-    ]
-    
-    for query_term in search_queries:
-        params = {
-            "action": "query",
-            "format": "json",
-            "generator": "search",
-            "gsrsearch": f"File:{query_term}",
-            "gsrlimit": 5,
-            "prop": "imageinfo",
-            "iiprop": "url|mime"
-        }
+    # 1. Versuch: Deutsche Wikipedia
+    try:
+        encoded_de = urllib.parse.quote(disease_de)
+        url_de = f"https://de.wikipedia.org/api/rest_v1/page/summary/{encoded_de}"
+        res = requests.get(url_de, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if "originalimage" in data:
+                return data["originalimage"]["source"]
+            elif "thumbnail" in data:
+                return data["thumbnail"]["source"]
+    except Exception:
+        pass
+
+    # 2. Versuch: Englische Wikipedia (falls DE kein Bild hat oder Artikelname abweicht)
+    if disease_en and disease_en != "Disease":
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=5).json()
-            pages = r.get("query", {}).get("pages", {})
-            for _, page in pages.items():
-                imageinfo = page.get("imageinfo", [])
-                if imageinfo:
-                    img_url = imageinfo[0].get("url", "")
-                    mime = imageinfo[0].get("mime", "")
-                    if any(valid_type in mime for valid_type in ["image/jpeg", "image/png", "image/svg+xml", "image/webp"]):
-                        return img_url
+            encoded_en = urllib.parse.quote(disease_en)
+            url_en = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded_en}"
+            res = requests.get(url_en, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if "originalimage" in data:
+                    return data["originalimage"]["source"]
+                elif "thumbnail" in data:
+                    return data["thumbnail"]["source"]
         except Exception:
-            continue
+            pass
+
     return None
 
 # --- Gemini KI API Helper ---
@@ -122,25 +118,48 @@ def call_gemini_api(prompt, api_key):
         raise RuntimeError("Kein passendes Gemini-Modell verfügbar.")
 
 def generate_disease_summary(disease_name, api_key):
-    """Generiert eine strukturierte medizinische Übersicht zu einem Krankheitsbild."""
+    """Generiert einen tiefgehenden, detaillierten Fachtext im Stil von AMBOSS/DocCheck."""
     prompt = f"""
-    Du bist ein erfahrener Facharzt für Innere Medizin. Erstelle eine fundierte, hochgradig praxistaugliche und strukturierte Übersicht zum Krankheitsbild: "{disease_name}".
+    Du bist ein führender Oberarzt der Inneren Medizin und Verfasser medizinischer Standardwerke (wie AMBOSS oder DocCheck Flexikon).
+    Erstelle ein extrem ausführliches, klinikrelevantes und vollständiges Skript zum Krankheitsbild: "{disease_name}".
     
-    Gliedere die Antwort präzise in folgende Abschnitte:
-    1. **Kurzzusammenfassung & Definition**
-    2. **Epidemiologie, Ätiologie & Pathophysiologie**
-    3. **Klinik & Leitsymptome**
-    4. **Diagnostik** (Labor, Bildgebung, Staging / Funktionsdiagnostik)
-    5. **Therapie & Leitlinienprinzipien** (Konservativ, Pharmakologisch, Interventionell/Operativ)
-    6. **Wichtige Differenzialdiagnosen**
+    WICHTIG: Schreibe nicht nur Gliederungen oder Stichpunkte ohne Inhalt! Fülle JEDEN Punkt mit konkretem klinischem Wissen, exakten Laborwerten, Scores, Wirkstoffen und Behandlungsschemata aus.
 
-    Gib am Ende EXAKT diese Steuerzeile aus:
-    SCHLAGWORT_EN: [Englisches Haupt-Suchwort für Anatomie/Schema, z.B. "Aortic stenosis", "Atrial fibrillation", "Pulmonary embolism", "Crohn disease"]
+    Gliedere den Text exakt in folgende Abschnitte:
+
+    ## 1. Definition & Epidemiologie
+    - Genaue medizinische Definition.
+    - Epidemiologische Eckdaten (Inzidenz, Prävalenz, Alters-/Geschlechtsverteilung).
+
+    ## 2. Ätiologie & Pathophysiologie
+    - Ursachen, Risikofaktoren und Auslöser.
+    - Detaillierter pathophysiologischer Ablauf / Entstehungsmechanismus.
+
+    ## 3. Leitsymptome & Klinisches Bild
+    - Typische Leitsymptome, Verlaufsformen und Warnzeichen (Red Flags).
+    - Komplikationen bei Fortschreiten.
+
+    ## 4. Diagnostischer Pfad
+    - **Anamnese & Körperliche Untersuchung** (spezifische Zeichen/Tests).
+    - **Labor**: Spezifische Marker, Zielwerte, Differenzialparameter.
+    - **Apparative Diagnostik**: EKG, Bildgebung (Röntgen, CT, Sono, Echo) mit typischen Befunden.
+    - **Klassifikation & Scores** (falls vorhanden, z.B. NYHA, CURB-65, CHA₂DS₂-VASc, Child-Pugh).
+
+    ## 5. Therapie & Leitlinien
+    - **Allgemein- & Akutmaßnahmen**.
+    - **Pharmakotherapie**: Konkrete Wirkstoffgruppen, First-Line-Medikamente und Wirkmechanismen.
+    - **Interventionelle / Operative Verfahren**: Indikationen und Optionen.
+
+    ## 6. Differenzialdiagnosen
+    - Die wichtigsten 3–5 Differenzialdiagnosen mit prägnantem Unterscheidungsmerkmal.
+
+    Gib ganz am Ende EXAKT diese Steuerzeile aus:
+    SCHLAGWORT_EN: [Der exakte englische Wikipedia-Artikelname für dieses Thema, z.B. "Aortic stenosis", "Atrial fibrillation", "Pulmonary embolism", "Crohn's disease"]
     """
     return call_gemini_api(prompt, api_key)
 
 def extract_english_keyword(text):
-    """Extrahiert das englische Schlagwort für die Bildersuche."""
+    """Extrahiert den englischen Begriff für die Wikipedia-Suche."""
     if "SCHLAGWORT_EN:" in text:
         raw = text.split("SCHLAGWORT_EN:")[-1].split("\n")[0]
         return re.sub(r"[\[\]\*\_\.\"]", "", raw).strip()
@@ -184,24 +203,24 @@ if not api_key:
     api_key = st.text_input("Bitte Gemini API Key eingeben:", type="password")
 
 if api_key:
-    with st.spinner(f"Erstelle klinische Übersicht zu „{st.session_state.selected_disease}“..."):
+    with st.spinner(f"Erstelle umfassenden Fachtext zu „{st.session_state.selected_disease}“..."):
         try:
             raw_text = generate_disease_summary(st.session_state.selected_disease, api_key)
             english_kw = extract_english_keyword(raw_text)
             display_text = clean_display_text(raw_text)
             
-            col_main, col_side = st.columns([2.2, 1])
+            col_main, col_side = st.columns([2.3, 1])
             
             with col_main:
                 st.markdown(display_text)
                 
             with col_side:
-                st.markdown("### 📊 Schemata & Anatomie")
-                img_url = fetch_schema_image(english_kw)
+                st.markdown("### 📊 Schema / Abbildung")
+                img_url = fetch_wikipedia_image(st.session_state.selected_disease, english_kw)
                 if img_url:
-                    st.image(img_url, caption=f"Schema zu: {st.session_state.selected_disease} ({english_kw})", use_container_width=True)
+                    st.image(img_url, caption=f"Kuratierte Abbildung aus Wikipedia: {st.session_state.selected_disease}", use_container_width=True)
                 else:
-                    st.info(f"Kein freies Schema zu „{english_kw}“ bei Wikimedia Commons gefunden.")
+                    st.info(f"Keine direkte Abbildung im Wikipedia-Artikel zu „{st.session_state.selected_disease}“ vorhanden.")
                     
         except Exception as e:
             st.error(f"Fehler bei der Generierung: {e}")
